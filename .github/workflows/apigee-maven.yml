@@ -1,0 +1,117 @@
+# This workflow will build a Java project with Maven, and cache/restore any dependencies to improve the workflow execution time
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-maven
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Java CI with Maven
+
+on:
+  push:
+    branches: [ "main" ]
+env:
+  API_VERSION: googleapi 
+  # or 
+  #API_VERSION: apigeeapi
+
+  # Default Target Apigee Organization et environment (can be also be dynamically defined in [Set Variables *] steps)
+  DEFAULT_APIGEE_ORG: bap-emea-apigee-5
+  DEFAULT_APIGEE_ENV: customer-assist-env
+  TEST_HOST: 34.117.38.184.nip.io
+
+  # Retrieve Apigee UserID and password from repository settings (secrets)
+  APIGEE_CREDS_USR: ${{ secrets.APIGEE_CREDS_USR }}
+  APIGEE_CREDS_PSW: ${{ secrets.APIGEE_CREDS_PSW }}
+
+  GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+  # These variables will be dynamically defined in [Set Variables *] steps
+  AUTHOR_EMAIL: ''
+  APIGEE_ORG: ''
+  APIGEE_ENV: ''
+  APIGEE_DEPLOYMENT_SUFFIX: ''
+
+jobs:
+  Apigee-Deploy:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+       # Set Variables depending on branch
+      - name: Set Variables for [Main] branch
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "AUTHOR_EMAIL=$(echo $GITHUB_ACTOR)" >> $GITHUB_ENV
+          echo "APIGEE_ORG=$(echo $DEFAULT_APIGEE_ORG)" >> $GITHUB_ENV
+          echo "APIGEE_ENV=$(echo $DEFAULT_APIGEE_ENV)" >> $GITHUB_ENV
+
+      - name: Set Variables for [Prod] branch
+        if: github.ref == 'refs/heads/prod'
+        run: |
+          echo "AUTHOR_EMAIL=$(echo $GITHUB_ACTOR)" >> $GITHUB_ENV
+          echo "APIGEE_ORG=$(echo $DEFAULT_APIGEE_ORG)" >> $GITHUB_ENV
+          echo "APIGEE_ENV=prod)" >> $GITHUB_ENV
+  
+      - name: Set Variables for branch not [Main], not [Prod]
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/prod'
+        run: |
+          echo "APIGEE_DEPLOYMENT_SUFFIX=$(echo $GITHUB_REF | sed 's/.*\///')" >> $GITHUB_ENV
+          echo "AUTHOR_EMAIL=$(echo $GITHUB_ACTOR)" >> $GITHUB_ENV
+          echo "APIGEE_ORG=$(echo $DEFAULT_APIGEE_ORG)" >> $GITHUB_ENV
+          echo "APIGEE_ENV=$(echo $DEFAULT_APIGEE_ENV)" >> $GITHUB_ENV
+
+      # Setup Maven & Maven Cache
+      - name: Set up JDK 1.8
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin' 
+          java-version: 8
+
+      - name: Cache the Maven packages to speed up build
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2   
+
+
+  # Generate SA key file from secret variable
+      - name: Generate SA key file
+        if: env.API_VERSION == 'googleapi'
+        run: | 
+          echo $GCP_SERVICE_ACCOUNT > sa.json
+
+  # Package & Deploy Apigee proxy (Apigee [Deploy] Maven plugin)
+      - name: mvn package
+        run: mvn process-resources -P$API_VERSION -Dcommit=$GIT_COMMIT -Dauthor=$AUTHOR_EMAIL -Ddeployment.suffix=$APIGEE_DEPLOYMENT_SUFFIX
+
+      - name: mvn config
+        run: mvn apigee-enterprise:configure -q -P$API_VERSION -Dorg=$APIGEE_ORG -Denv=$APIGEE_ENV  -Ddeployment.suffix=$APIGEE_DEPLOYMENT_SUFFIX 
+
+     
+      - name: mvn deploy proxy xhybrid
+        if: env.API_VERSION == 'googleapi'
+        run: mvn apigee-enterprise:deploy -q -Pgoogleapi -Denv=$APIGEE_ENV -Dsa=sa.json -Dorg=$APIGEE_ORG -Ddeployment.suffix=$APIGEE_DEPLOYMENT_SUFFIX  
+     
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK 8
+      uses: actions/setup-java@v3
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+        cache: maven
+    - name: Build with Maven
+      run: mvn -B package --file pom.xml
+
+    # Optional: Uploads the full dependency graph to GitHub to improve the quality of Dependabot alerts this repository can receive
+    - name: Update dependency graph
+      uses: advanced-security/maven-dependency-submission-action@571e99aab1055c2e71a1e2309b9691de18d6b7d6
